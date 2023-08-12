@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-jwt_key = "AZ"
+jwt_key = ""
 key_header = {
     'Authorization': f"JWT {jwt_key}"
 }
