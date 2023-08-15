@@ -12,16 +12,13 @@ key_header = {
     'Authorization': f"JWT {jwt_key}"
 }
 
-csv_filename = "market_summary.csv"
 def_wfm_url = "https://api.warframe.market/v1/items"  # default access link
-rq_min_delay = 1
-update_threshold_days = 7  # threshold days for considering a full scan outdated
-accounted_days = 30
+accounted_days = 14
 
 item_exclusion_tags = ['barrel', 'receiver', 'stock', 'chassis', 'neuroptics', 'systems', 'relic', 'emote', 'pouch',
                        'hilt', 'guard',
                        'string', 'lower_limb', 'upper_limb', 'key', 'handle', 'ornament', 'capsule',
-                       'casing', 'weapon_', 'engine', 'handle', 'blade', 'grip', 'scene', 'carapace', 'cerebrum',
+                       'casing', 'weapon_pod', 'engine', 'handle', 'blade', 'grip', 'scene', 'carapace', 'cerebrum',
                        'head',
                        'motor', 'blade', 'barrels', 'link', 'receivers', 'prime_blueprint', 'chassis_blueprint',
                        'neuroptics_blueprint',
@@ -95,7 +92,7 @@ def GetItemInformation(item_url_name, wfm_url=def_wfm_url):  # Gets all the info
     return clean_item_info_df
 
 
-def GetItemOrderInformation(item_url_name, row_limit=8, wfm_url=def_wfm_url):
+def GetItemOrderInformation(item_url_name, row_limit=4, wfm_url=def_wfm_url):
     # Gets all the order information of a prompted item
 
     r = requests.get(f"{wfm_url}/{item_url_name}/orders")
@@ -146,9 +143,18 @@ def GetItemOrderInformation(item_url_name, row_limit=8, wfm_url=def_wfm_url):
     current_spread = item_sells_df['platinum'].min() - item_buys_df['platinum'].max()
 
     # 3x weighted spread for bid/ask
-    # avg_lowest_sell = item_sells_df['platinum']
+    avg_sell = item_sells_df['platinum'].mean()
+    avg_buy = item_buys_df['platinum'].mean()
+    avg_spread = avg_sell - avg_buy
 
-    return item_orders_df, item_sells_df, item_buys_df, current_spread
+    numerical_results = {
+        'avg_sell': avg_sell,
+        'avg_buy': avg_buy,
+        'avg_spread': avg_spread,
+        'current_spread': current_spread
+    }
+
+    return item_orders_df, item_sells_df, item_buys_df, numerical_results
 
 
 def CreateEmptyHistory():  # this is used in case the item has invalid data, stuff like no transaction within date
@@ -173,11 +179,11 @@ def CheckTradeHistory(item_url_name, wfm_url=def_wfm_url):
 
     r = requests.get(f"{wfm_url}/{item_url_name}/statistics", headers=key_header)
     if r.status_code == 200:
-        print(f"\n{item_url_name} [{r.status_code}]")
+        print(f"{item_url_name} [{r.status_code}]")
         item_trade_hist_df = pd.DataFrame(r.json()['payload']['statistics_closed']['90days'])
         return item_trade_hist_df
     else:
-        print(f"\n{item_url_name} is unreachable. [{r.status_code}]")
+        print(f"{item_url_name} is unreachable. [{r.status_code}]")
         return CreateEmptyHistory()
 
 
@@ -191,13 +197,15 @@ def GetItemMarketStatistics(item_url_name, wfm_url=def_wfm_url,
     # checks for mod_ranks, datetime columns, and id.
     item_statistics_closed_df = CheckForMissingColumns(item_statistics_closed_df, True, True, True)
 
-    # fill nas
-    item_statistics_closed_df = item_statistics_closed_df.fillna(method="ffill")
+    # Convert 'datetime' to UTC-aware datetime
+    item_statistics_closed_df['datetime'] = pd.to_datetime(item_statistics_closed_df['datetime'], utc=True)
 
-    # this is here for tz-naive and tz-aware -- i'm not sure what this means, but it fixes it..
+    # Calculate the difference in days
     current_utc_datetime = datetime.now(timezone.utc)
-    item_statistics_closed_df['datetime'] = pd.to_datetime(item_statistics_closed_df['datetime'])
     item_statistics_closed_df['datetime'] = (current_utc_datetime - item_statistics_closed_df['datetime']).dt.days
+
+    # Fill NaN values
+    item_statistics_closed_df = item_statistics_closed_df.fillna(method="ffill")
 
     # rename datetime to days ago
     item_statistics_closed_df = item_statistics_closed_df.rename(columns={'datetime': 'days_ago'})
@@ -227,6 +235,7 @@ def GetSummarizedItemMarketStatistics(item_url_name, wfm_url=def_wfm_url,
 
     avg_volume = item_statistics_closed_df['volume'].mean().round(2)
     avg_spread = item_statistics_closed_df['spread'].mean().round(2)
+    avg_spread_turnover = (item_statistics_closed_df['volume'] * item_statistics_closed_df['spread']).mean().round(2)
     avg_median_price = item_statistics_closed_df['median'].mean().round(2)
     avg_min_price = item_statistics_closed_df['min_price'].min().round(2)
     avg_typical_price = item_statistics_closed_df.eval(
@@ -235,20 +244,36 @@ def GetSummarizedItemMarketStatistics(item_url_name, wfm_url=def_wfm_url,
     # mod_rank number is filtered out anyway, so just get the first one. I just need *a* number.
     mod_rank = item_statistics_closed_df['mod_rank'].iloc[0]
 
-    return avg_volume, avg_spread, avg_median_price, avg_min_price, avg_typical_price, mod_rank
+    result = {
+        'avg_volume': avg_volume,
+        'avg_spread': avg_spread,
+        'avg_spread_turnover': avg_spread_turnover,
+        'avg_median_price': avg_median_price,
+        'avg_min_price': avg_min_price,
+        'avg_typical_price': avg_typical_price,
+        'mod_rank': mod_rank
+    }
+
+    return result
 
 
-def CheckIfCSVNeedsUpdate(filename=csv_filename, days_until_outdated=update_threshold_days):
+def CheckIfCSVNeedsUpdate(csv_filename, days_until_outdated):
     # last modified time date
-    file_modified_time = datetime.fromtimestamp(os.path.getmtime(filename))
-    # allowed threshold date for considering it outdated
-    threshold_time = datetime.now() - timedelta(days=days_until_outdated)
+    if os.path.exists(csv_filename):
+        file_modified_time = datetime.fromtimestamp(os.path.getmtime(csv_filename))
+        # allowed threshold date for considering it outdated
+        threshold_time = datetime.now() - timedelta(days=days_until_outdated)
 
-    if file_modified_time <= threshold_time:
+        update_flag = file_modified_time <= threshold_time
+        reason = f"Outdated by {(datetime.now() - file_modified_time).days} day(s)."
+    else:
+        update_flag = True
+        reason = "FILE DOES NOT EXIST"
+
+    if update_flag:
         # notify user
         print(
-            f"The CSV file is outdated by {(datetime.now() - file_modified_time).days} day(s).\nRecommend a full "
-            f"market scan.\n")
+            f"Recommend a full market scan.\nReason: {reason}\n")
         # ask if you want to update
         response = input("Would you like to perform the update? [y/n]: ").lower()
         if 'y' in response:
@@ -265,69 +290,43 @@ def CheckIfCSVNeedsUpdate(filename=csv_filename, days_until_outdated=update_thre
 
 
 async def GetSummarizedItemMarketStatisticsAsync(item_url_name, wfm_url=def_wfm_url, days=accounted_days):
-    avg_volume, avg_spread, avg_median_price, avg_min_price, avg_typical_price, mod_rank = await asyncio.to_thread(
+    result = await asyncio.to_thread(
         GetSummarizedItemMarketStatistics, item_url_name, wfm_url, days)
-    return avg_volume, avg_spread, avg_median_price, avg_min_price, avg_typical_price, mod_rank
+    return result
 
 
-async def GetAllSummarizedMarketStatistics(wfm_url=def_wfm_url, days=accounted_days, chunk_size=5, delay=rq_min_delay):
-    item_list_df = GetAllItemsList(wfm_url)
+async def GetAllSummarizedMarketStatistics(csv_filename, wfm_url=def_wfm_url, days=accounted_days):
+    item_list = GetAllItemsList(wfm_url).index
 
-    numeric_columns = ['avg_volume', 'avg_spread', 'avg_median_price', 'avg_min_price', 'avg_typical_price', 'mod_rank']
+    summarized_data_df = pd.DataFrame(index=item_list)
 
-    summarized_data_df = pd.DataFrame()
-    summarized_data_df.index = item_list_df.index
+    summarized_data_df = summarized_data_df[0:20]  # if you want to do this piece wise :)
+    # the official rate limit is 3 requests per second. chunk_size of 5 and rq delay of 1.1 works well.
+    chunk_size = 5
+    rq_delay = 1.1
 
-    # summarized_data_df = summarized_data_df[0:100]  # if you want to do this piece wise :)
-
-    # the official rate limit is 3 requests per second. chunk_size of 5 and rq delay of 1 works well.
     for start in tqdm(range(0, len(summarized_data_df), chunk_size)):
         chunk = summarized_data_df[start:start + chunk_size]
 
-        tasks = [GetSummarizedItemMarketStatisticsAsync(item_name, wfm_url, days) for item_name, _ in chunk.iterrows()]
+        tasks = [GetSummarizedItemMarketStatisticsAsync(url_name, wfm_url, days) for url_name in chunk.index]
         results = await asyncio.gather(*tasks)
-        await asyncio.sleep(delay)
+        await asyncio.sleep(rq_delay)
 
         # Convert results to a DataFrame
-        chunk_results_df = pd.DataFrame(results, columns=numeric_columns, index=chunk.index)
+        chunk_results_df = pd.DataFrame(results, index=chunk.index)
 
         # Merge chunk_results_df into summarized_data_df using .loc
-        summarized_data_df.loc[chunk_results_df.index, numeric_columns] = chunk_results_df
+        summarized_data_df.loc[chunk_results_df.index, chunk_results_df.columns] = chunk_results_df
 
-    print(summarized_data_df)
+    print(f"\nsummarized_data_df\n")
 
     summarized_data_df.to_csv(csv_filename, mode="w")
 
     return summarized_data_df
 
-"""
-async def GetAllLiveListingsData(wfm_url=def_wfm_url, days=accounted_days, chunk_size=5, delay=rq_min_delay):
-    item_list_df = GetAllItemsList(wfm_url)
 
-    numeric_columns = ['avg_volume', 'avg_spread', 'avg_median_price', 'avg_min_price', 'avg_typical_price', 'mod_rank']
+def ScrapeAll(csv_filename, days_until_outdated=2):
+    if CheckIfCSVNeedsUpdate(csv_filename, days_until_outdated=days_until_outdated):
+        asyncio.run(GetAllSummarizedMarketStatistics(csv_filename))
 
-    summarized_data_df = pd.DataFrame()
-    summarized_data_df.index = item_list_df.index
-
-    # summarized_data_df = summarized_data_df[0:100]  # if you want to do this piece wise :)
-
-    # the official rate limit is 3 requests per second. chunk_size of 5 and rq delay of 1 works well.
-    for start in tqdm(range(0, len(summarized_data_df), chunk_size)):
-        chunk = summarized_data_df[start:start + chunk_size]
-
-        tasks = [GetSummarizedItemMarketStatisticsAsync(item_name, wfm_url, days) for item_name, _ in chunk.iterrows()]
-        results = await asyncio.gather(*tasks)
-        await asyncio.sleep(delay)
-
-        # Convert results to a DataFrame
-        chunk_results_df = pd.DataFrame(results, columns=numeric_columns, index=chunk.index)
-
-        # Merge chunk_results_df into summarized_data_df using .loc
-        summarized_data_df.loc[chunk_results_df.index, numeric_columns] = chunk_results_df
-
-    print(summarized_data_df)
-
-    summarized_data_df.to_csv(csv_filename, mode="w")
-
-    return summarized_data_df
-"""
+    return
