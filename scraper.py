@@ -300,12 +300,13 @@ async def GetAllSummarizedMarketStatistics(csv_filename, wfm_url=def_wfm_url, da
 
     summarized_data_df = pd.DataFrame(index=item_list)
 
-    summarized_data_df = summarized_data_df[0:20]  # if you want to do this piece wise :)
+    #summarized_data_df = summarized_data_df[0:20]  # if you want to do this piece wise :)
     # the official rate limit is 3 requests per second. chunk_size of 5 and rq delay of 1.1 works well.
     chunk_size = 5
     rq_delay = 1.1
 
     for start in tqdm(range(0, len(summarized_data_df), chunk_size)):
+        print()
         chunk = summarized_data_df[start:start + chunk_size]
 
         tasks = [GetSummarizedItemMarketStatisticsAsync(url_name, wfm_url, days) for url_name in chunk.index]

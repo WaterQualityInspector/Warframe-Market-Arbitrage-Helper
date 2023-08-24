@@ -65,6 +65,8 @@ async def GetAllOrdersOfInterest(csv_filename, orders_of_interest_filename, min_
         # essentially min_spread * reversed_spread_factor = minimum in the negative direction.
 
         orders_of_interest_df['short_trade_viable'] = orders_of_interest_df['current_spread'] < 0
+        orders_of_interest_df=orders_of_interest_df.sort_values(['avg_spread'], ascending=False).reset_index(drop=False)
+
 
         print(orders_of_interest_df)
 
